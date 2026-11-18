@@ -14,6 +14,7 @@ public sealed class Config
     public bool AutoFetchAchievements = true;
     public bool AutoShowIfIncomplete = true;
     public bool ShowDebugUI = false;
+    public bool HideLocked = false;
     public JobChoice CraftJobType = JobChoice.指定职业;
     public uint SelectedCraftJob = 8;
     public uint SelectedGatherJob = 16;
@@ -39,7 +40,9 @@ public sealed class Config
             NotifyModified();
         if (ImGui.Checkbox("如果限额未用完则在登录时自动打开窗口", ref AutoShowIfIncomplete))
             NotifyModified();
-        if (ImGui.Checkbox("开启 Debug", ref ShowDebugUI))
+        if (ImGui.Checkbox("显示调试信息", ref ShowDebugUI))
+            NotifyModified();
+        if (ImGui.Checkbox("隐藏未解锁的老主顾", ref HideLocked))
             NotifyModified();
         if (ImGuiUtils.Enum("职业选择", ref CraftJobType))
             NotifyModified();

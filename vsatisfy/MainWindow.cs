@@ -1,4 +1,4 @@
-﻿using clib.Services;
+using clib.Services;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Utility.Raii;
@@ -6,6 +6,7 @@ using Dalamud.Interface.Windowing;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
 using FFXIVClientStructs.FFXIV.Client.Game.UI;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using FFXIVClientStructs.Interop;
 using Dalamud.Interface.Colors;
@@ -20,11 +21,12 @@ public unsafe class MainWindow : Window, IDisposable
     private readonly Achievements _achi = new();
     private readonly List<NPCInfo> _npcs = [];
     private readonly List<(uint Currency, int Amount, int Count)> _rewards = [];
-    private bool _wasLoaded;
 
-    public MainWindow() : base("Satisfier")
+    public MainWindow() : base("老主顾助手")
     {
         _achi.AchievementProgress += OnAchievementProgress;
+        Service.ClientState.Login += OnLogin;
+        Service.ClientState.Logout += OnLogout;
 
         TitleBarButtons.Add(new() { Icon = FontAwesomeIcon.Cog, IconOffset = new(1), Click = _ => ImGui.OpenPopup("###config") });
 
@@ -57,38 +59,31 @@ public unsafe class MainWindow : Window, IDisposable
         //_npcs[11].InitHardcodedData(3996, 1185);
 
         if (_npcs.Any(n => n.AchievementId is 0 || n.TerritoryId is 0))
-            Service.Log.Warning("Some NPCs are missing hardcoded data. Please report this on GitHub.");
+            Service.Log.Warning("部分 NPC 缺少硬编码数据，请在 GitHub 上反馈。");
     }
 
     public void Dispose()
     {
+        Service.ClientState.Login -= OnLogin;
+        Service.ClientState.Logout -= OnLogout;
         _achi.AchievementProgress -= OnAchievementProgress;
         _achi.Dispose();
     }
 
-    public override void PreOpenCheck()
-    {
-        var isLoaded = UIState.Instance()->PlayerState.IsLoaded;
-        if (_wasLoaded == isLoaded)
-            return;
+    private void OnLogin()
+        => IsOpen = Plugin.Config.AutoShowIfIncomplete && SatisfactionSupplyManager.Instance()->GetRemainingAllowances() > 0 && _npcs.Any(n => n.IsUnlocked);
 
-        if (isLoaded)
-        {
-            IsOpen = Plugin.Config.AutoShowIfIncomplete && SatisfactionSupplyManager.Instance()->GetRemainingAllowances() > 0 && _npcs.Any(n => n.IsUnlocked);
-        }
-        else
-        {
-            foreach (var npc in _npcs)
-                npc.AchievementStart = npc.AchievementMax = 0;
-            IsOpen = false;
-        }
-        _wasLoaded = isLoaded;
+    private void OnLogout(int type, int code)
+    {
+        foreach (var npc in _npcs)
+            npc.AchievementStart = npc.AchievementMax = 0;
+        IsOpen = false;
     }
 
     public override void Draw()
     {
         DrawConfig();
-        if (_wasLoaded)
+        if (UIState.Instance()->PlayerState.IsLoaded)
         {
             UpdateData();
             DrawMainTable();
@@ -97,6 +92,30 @@ public unsafe class MainWindow : Window, IDisposable
 
         if (Plugin.Config.ShowDebugUI && ImGui.CollapsingHeader("调试"))
             DrawDebug();
+    }
+
+    public bool StartTurnIn(uint npcRowId, int kind)
+    {
+        if (!UIState.Instance()->PlayerState.IsLoaded || Svc.Automation.Running || _npcs.Find(n => n.Index + 1 == npcRowId) is not { } npc)
+            return false;
+
+        UpdateData();
+        if (!npc.IsUnlocked || npc.MaxDeliveries - npc.UsedDeliveries <= 0)
+            return false;
+
+        AutoCommon? task = kind switch
+        {
+            0 => new AutoCraft(npc),
+            1 => new AutoGather(npc),
+            2 => new AutoFish(npc),
+            _ => null
+        };
+        if (task == null)
+            return false;
+
+        IsOpen = true;
+        Svc.Automation.Start(task);
+        return true;
     }
 
     private void DrawConfig()
@@ -117,8 +136,6 @@ public unsafe class MainWindow : Window, IDisposable
         foreach (var npc in _npcs)
         {
             var sheetIndex = (byte)(npc.Index + 1);
-            if (Service.LuminaRow<SatisfactionNpc>((uint)npc.Index) is { QuestRequired.RowId: var questId })
-                npc.Unlocked = QuestManager.IsQuestComplete(questId);
             npc.Rank = inst->SatisfactionRanks[npc.Index];
             npc.SatisfactionCur = inst->Satisfaction[npc.Index];
             npc.SatisfactionMax = Service.LuminaRow<SatisfactionNpc>(sheetIndex)!.Value.SatisfactionNpcParams[npc.Rank].SatisfactionRequired;
@@ -210,7 +227,7 @@ public unsafe class MainWindow : Window, IDisposable
         ImGui.SameLine();
         ImGui.TextUnformatted($"状态: {Svc.Automation.CurrentTask?.Status ?? "空闲"}");
 
-        ImGui.TextColored(ImGuiColors.DalamudOrange, "注意：此插件依赖 vnavmesh 寻路、 Artisan 进行制作、Questionable 进行采集，如果你已安装，请忽略本提示。");
+        ImGui.TextColored(ImGuiColors.DalamudOrange, "注意：本插件依赖 vnavmesh 寻路、Artisan 制作、Gather n Chill 采集，未安装请先安装。");
 
         using var table = ImRaii.Table("main_table", 5);
         if (!table)
@@ -223,6 +240,8 @@ public unsafe class MainWindow : Window, IDisposable
         ImGui.TableHeadersRow();
         foreach (var npc in _npcs)
         {
+            if (!npc.IsUnlocked && Plugin.Config.HideLocked)
+                continue;
             using var id = ImRaii.PushId(npc.Index);
 
             ImGui.TableNextColumn();
@@ -244,7 +263,7 @@ public unsafe class MainWindow : Window, IDisposable
             ImGui.TableNextColumn();
             if (npc.AchievementMax > 0)
                 ImGui.ProgressBar((float)npc.AchievementCur / npc.AchievementMax, new(120, 0), $"{npc.AchievementCur} / {npc.AchievementMax} ({(npc.AchievementMax - npc.AchievementCur) / 6.0:0.0})");
-            else if (npc.AchievementId != 0 && !Plugin.Config.AutoFetchAchievements && ImGui.Button("Fetch...", new(120, 0)))
+            else if (npc.AchievementId != 0 && !Plugin.Config.AutoFetchAchievements && ImGui.Button("获取...", new(120, 0)))
                 _achi.Request(npc.AchievementId);
 
             ImGui.TableNextColumn();
@@ -297,15 +316,15 @@ public unsafe class MainWindow : Window, IDisposable
         var bonusOverrideRow = inst->BonusGuaranteeRowId != 0xFF ? inst->BonusGuaranteeRowId : calcBonus;
         var bonusOverride = bonusOverrideRow >= 0 ? Service.LuminaRow<SatisfactionBonusGuarantee>((uint)bonusOverrideRow) : null;
 
-        ImGui.Text($"Seed: {inst->SupplySeed}, fixed-rng={inst->FixedRandom}");
-        ImGui.Text($"Guarantee row: {inst->BonusGuaranteeRowId}, adj={inst->TimeAdjustmentForBonusGuarantee}, calculated={calcBonus}");
+        ImGui.Text($"种子: {inst->SupplySeed}, 固定随机={inst->FixedRandom}");
+        ImGui.Text($"保底行: {inst->BonusGuaranteeRowId}, 调整值={inst->TimeAdjustmentForBonusGuarantee}, 计算值={calcBonus}");
         ImGui.Separator();
         foreach (var npc in _npcs)
         {
             ImGui.Text($"{npc.Name}");
             var supplyRows = supplySheet.GetRow(npc.SupplyIndex);
-            ImGui.Text($"#{npc.Index}: rank={npc.Rank}, supply={npc.SupplyIndex} ({supplyRows.Count} subrows), satisfaction={npc.SatisfactionCur}/{npc.SatisfactionMax}, usedAllowances={npc.UsedDeliveries}");
-            ImGui.Text($"InProgress: {Game.IsTurnInSupplyInProgress(npc)}");
+            ImGui.Text($"#{npc.Index}: 排名={npc.Rank}, 供给={npc.SupplyIndex} ({supplyRows.Count} 个子行), 满意度={npc.SatisfactionCur}/{npc.SatisfactionMax}, 已用次数={npc.UsedDeliveries}");
+            ImGui.Text($"进行中: {AgentSatisfactionSupply.IsOpenFor(npc)}, 已解锁: {npc.IsUnlocked}");
             for (var i = 0; i < npc.Requests.Length; ++i)
             {
                 var item = supplyRows[(int)npc.Requests[i]].Item;
@@ -316,38 +335,38 @@ public unsafe class MainWindow : Window, IDisposable
                 var aetheryte = Map.FindClosestAetheryte(territory, pos);
                 var aetheryteRow = Service.LuminaRow<Aetheryte>(aetheryte)!.Value;
                 var aetheryteName = aetheryteRow.AethernetName.RowId != 0 ? aetheryteRow.AethernetName.Value : aetheryteRow.PlaceName.Value;
-                return $"{territory} '{Service.LuminaRow<TerritoryType>(territory)!.Value.Name}' {pos} near {aetheryte} '{aetheryteName.Name}'";
+                return $"{territory} '{Service.LuminaRow<TerritoryType>(territory)!.Value.Name}' {pos} 最近水晶 {aetheryte} '{aetheryteName.Name}'";
             }
             if (npc.CraftData != null)
             {
-                ImGui.Text($"> buy from {npc.CraftData.VendorInstanceId:X}/{npc.CraftData.VendorShopId} @ {locationString(npc.TerritoryId, npc.CraftData.VendorLocation)}");
-                ImGui.Text($"> turnin to {npc.CraftData.TurnInInstanceId:X} @ {locationString(npc.TerritoryId, npc.CraftData.VendorLocation)}");
+                ImGui.Text($"> 购买自 {npc.CraftData.VendorInstanceId:X}/{npc.CraftData.VendorShopId} @ {locationString(npc.TerritoryId, npc.CraftData.VendorLocation)}");
+                ImGui.Text($"> 交付至 {npc.CraftData.TurnInInstanceId:X} @ {locationString(npc.TerritoryId, npc.CraftData.VendorLocation)}");
             }
             if (npc.FishData != null)
             {
                 if (npc.FishData.IsSpearFish)
-                    ImGui.Text($"> spearfish from {npc.FishData.FishSpotId} '{Service.LuminaRow<SpearfishingNotebook>(npc.FishData.FishSpotId)?.PlaceName.ValueNullable?.Name}' @ {locationString(npc.FishData.TerritoryTypeId, npc.FishData.Center)}");
+                    ImGui.Text($"> 刺鱼点 {npc.FishData.FishSpotId} '{Service.LuminaRow<SpearfishingNotebook>(npc.FishData.FishSpotId)?.PlaceName.ValueNullable?.Name}' @ {locationString(npc.FishData.TerritoryTypeId, npc.FishData.Center)}");
                 else
-                    ImGui.Text($"> fish from {npc.FishData.FishSpotId} '{Service.LuminaRow<FishingSpot>(npc.FishData.FishSpotId)?.PlaceName.ValueNullable?.Name}' @ {locationString(npc.FishData.TerritoryTypeId, npc.FishData.Center)}");
+                    ImGui.Text($"> 钓场 {npc.FishData.FishSpotId} '{Service.LuminaRow<FishingSpot>(npc.FishData.FishSpotId)?.PlaceName.ValueNullable?.Name}' @ {locationString(npc.FishData.TerritoryTypeId, npc.FishData.Center)}");
             }
-            ImGui.Text($"Achievement #{npc.AchievementId}: {npc.AchievementCur}/{npc.AchievementMax} -- {npc.AchievementStart}");
+            ImGui.Text($"成就 #{npc.AchievementId}: {npc.AchievementCur}/{npc.AchievementMax} -- {npc.AchievementStart}");
             ImGui.Separator();
         }
-        ImGui.Text($"Current NPC: {inst->CurrentNpc}, supply={inst->CurrentSupplyRowId}");
+        ImGui.Text($"当前 NPC: {inst->CurrentNpc}, 供给={inst->CurrentSupplyRowId}");
 
         var ui = UIState.Instance();
-        ImGui.Text($"Player loaded: {ui->PlayerState.IsLoaded}");
-        ImGui.Text($"Achievement state: complete={ui->Achievement.State}, progress={ui->Achievement.ProgressRequestState}");
+        ImGui.Text($"玩家已加载: {ui->PlayerState.IsLoaded}");
+        ImGui.Text($"成就状态: 完成={ui->Achievement.State}, 进度请求={ui->Achievement.ProgressRequestState}");
 
         var agentSat = AgentSatisfactionSupply.Instance();
-        var addonSat = Game.GetFocusedAddonByID(agentSat->AddonId);
-        ImGui.Text($"AgentSat: {agentSat->IsAgentActive()}/{(addonSat != null ? addonSat->IsVisible : null)}, id={agentSat->NpcInfo.Id}");
+        var addonSat = RaptureAtkUnitManager.GetFocusedAddonById(agentSat->AddonId);
+        ImGui.Text($"老主顾代理: {agentSat->IsAgentActive()}/{(addonSat != null ? addonSat->IsVisible : null)}, id={agentSat->NpcInfo.Id}");
 
         var agentReq = AgentNpcTrade.Instance();
-        ImGui.Text($"NPCTrade: {ui->NpcTrade.Requests.Count}");
+        ImGui.Text($"NPC 交易: {ui->NpcTrade.Requests.Count}");
         for (var i = 0; i < ui->NpcTrade.Requests.Count; ++i)
             ImGui.Text($"[{i}] = {ui->NpcTrade.Requests.Items[i].ItemId} '{ui->NpcTrade.Requests.Items[i].ItemName}'");
-        ImGui.Text($"AgentReq: {agentReq->IsAgentActive()}, slot={agentReq->SelectedTurnInSlot}, opt={agentReq->SelectedTurnInSlotItemOptions}");
+        ImGui.Text($"交付代理: {agentReq->IsAgentActive()}, 槽位={agentReq->SelectedTurnInSlot}, 数量={agentReq->SelectedTurnInSlotItemOptions}");
 
         var target = TargetSystem.Instance()->Target;
         if (target != null)
@@ -357,7 +376,7 @@ public unsafe class MainWindow : Window, IDisposable
             var numHandlers = target->GetEventHandlersImpl(handlers);
             for (var i = 0; i < numHandlers; ++i)
             {
-                ImGui.Text($"eh{i}: {handlers[i]->Info.EventId.Id:X}");
+                ImGui.Text($"事件处理器{i}: {handlers[i]->Info.EventId.Id:X}");
             }
         }
     }

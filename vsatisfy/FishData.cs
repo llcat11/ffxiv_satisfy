@@ -34,7 +34,7 @@ public sealed class FishData
         }
         else
         {
-            throw new Exception($"Failed to find fishing location for {itemId}");
+            throw new Exception($"找不到物品 {itemId} 的钓场");
         }
     }
 }

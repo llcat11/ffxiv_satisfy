@@ -34,7 +34,7 @@ public sealed class GatherData
                 0 or 1 => 16u,
                 2 or 3 => 17u,
                 4 or 5 => 18u,
-                _ => throw new Exception($"Unknown gathering type {exportedPoint.Value.GatheringType.RowId}"),
+                _ => throw new Exception($"未知的采集类型 {exportedPoint.Value.GatheringType.RowId}"),
             };
             return new(point.GatheringPoint.Value.TerritoryType.RowId, pos, exportedPoint.Value.Radius, classJob);
         }

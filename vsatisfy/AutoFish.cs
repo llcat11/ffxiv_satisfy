@@ -1,3 +1,4 @@
+using FFXIVClientStructs.FFXIV.Client.Game;
 ﻿using clib.TaskSystem;
 using Lumina.Excel.Sheets;
 using System.Threading.Tasks;
@@ -15,10 +16,10 @@ public sealed class AutoFish(NPCInfo npc) : AutoCommon
             return; // nothing to do
 
         if (npc.FishData == null || npc.CraftData == null)
-            throw new Exception("Fish or turn-in data is not initialized");
+            throw new Exception("钓鱼或交付数据未初始化");
 
         var turnInItemId = npc.FishData.FishItemId;
-        var remainingFish = remainingTurnins - Game.NumItemsInInventory(turnInItemId, 1);
+        var remainingFish = remainingTurnins - InventoryManager.GetItemCount(turnInItemId, 1);
         if (remainingFish > 0)
         {
             Status = "前往渔点";
@@ -26,9 +27,9 @@ public sealed class AutoFish(NPCInfo npc) : AutoCommon
 
             // TODO: improve move-to destination (ideally closest point where you can actually fish...)
             if (npc.FishData.IsSpearFish)
-                Status = $"Spearfishing at {Service.LuminaRow<SpearfishingNotebook>(npc.FishData.FishSpotId)?.PlaceName.ValueNullable?.Name}";
+                Status = $"在 {Service.LuminaRow<SpearfishingNotebook>(npc.FishData.FishSpotId)?.PlaceName.ValueNullable?.Name} 刺鱼";
             else
-                Status = $"Fishing at {Service.LuminaRow<FishingSpot>(npc.FishData.FishSpotId)?.PlaceName.ValueNullable?.Name}";
+                Status = $"在 {Service.LuminaRow<FishingSpot>(npc.FishData.FishSpotId)?.PlaceName.ValueNullable?.Name} 钓鱼";
             await MoveTo(npc.FishData.Center, MovementConfig.Everything.WithTolerance(10));
         }
         else // TODO: full auto...
